@@ -1,2 +1,0 @@
-include *.yaml
-recursive-include get_model *.yaml
