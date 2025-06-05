@@ -4,6 +4,9 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Union
 import yaml
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class FeatureEncoder(nn.Module):
     """特征编码器模块"""
@@ -156,7 +159,8 @@ class YeastTransformer(nn.Module):
             dim_feedforward=self.hidden_dim * 4,
             dropout=self.dropout,
             activation=config['activation'],
-            layer_norm_eps=config['layer_norm_eps']
+            layer_norm_eps=float(config['layer_norm_eps']),
+            batch_first=True
         )
         self.transformer = nn.TransformerEncoder(
             encoder_layer,
@@ -165,9 +169,9 @@ class YeastTransformer(nn.Module):
         # LoRA可选：可在主干的线性层插入LoRA分支（如有需要可进一步细化）
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.unsqueeze(0)
+        # x: [batch, seq, d]
         output = self.transformer(x)
-        return output.squeeze(0)
+        return output
 
 class PredictionHead(nn.Module):
     """预测头模块"""
@@ -191,36 +195,98 @@ class PredictionHead(nn.Module):
         self.mlp = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.mlp(x)
+        # x: [batch, num_regions, hidden_dim]
+        x = self.mlp(x)  # [batch, num_regions, 1]
+        return x.squeeze(-1)  # [batch, num_regions]
 
 class YeastModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim=128, num_layers=3, use_lora=False, lora_rank=4, lora_alpha=16):
+    def __init__(self, cfg: Dict, use_lora=False, lora_rank=4, lora_alpha=16):
         super().__init__()
         self.use_lora = use_lora
-        layers = []
-        for i in range(num_layers):
-            in_dim = input_dim if i == 0 else hidden_dim
-            if use_lora:
-                layers.append(LoRALinear(in_dim, hidden_dim, r=lora_rank, alpha=lora_alpha))
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        
+        # 特征编码器
+        self.feature_encoder = FeatureEncoder(cfg['feature_encoders'])
+        
+        # 特征融合
+        self.feature_fusion = FeatureFusion(
+            cfg['feature_fusion'],
+            use_lora=use_lora,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha
+        )
+        
+        # Transformer
+        self.transformer = YeastTransformer(
+            cfg['transformer'],
+            use_lora=use_lora,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha
+        )
+        
+        # 预测头
+        self.prediction_head = PredictionHead(cfg['prediction_head'])
+        
+        # 损失函数
+        self.loss_fn = nn.MSELoss(reduction='mean')
+        
+        # 加载预训练检查点（如果存在）
+        if cfg.get('finetune', {}).get('pretrain_checkpoint', False):
+            checkpoint_path = cfg['finetune'].get('checkpoint')
+            if checkpoint_path and os.path.exists(checkpoint_path):
+                logger.info(f"加载预训练检查点: {checkpoint_path}")
+                checkpoint = torch.load(checkpoint_path, map_location='cpu')
+                if cfg['finetune'].get('model_key') == 'state_dict':
+                    self.load_state_dict(checkpoint, strict=cfg['finetune'].get('strict', False))
+                else:
+                    self.load_state_dict(checkpoint['model_state_dict'], strict=cfg['finetune'].get('strict', False))
+                logger.info("预训练检查点加载完成")
             else:
-                layers.append(nn.Linear(in_dim, hidden_dim))
-            layers.append(nn.ReLU())
-        self.mlp = nn.Sequential(*layers)
-        self.out = nn.Linear(hidden_dim, 1)
+                logger.warning(f"预训练检查点路径不存在: {checkpoint_path}")
 
-    def forward(self, x):
-        x = self.mlp(x)
-        return self.out(x).squeeze(-1)
+    def forward(self, features: Dict[str, torch.Tensor]) -> torch.Tensor:
+        # 特征编码
+        encoded_features = self.feature_encoder(features)
+        
+        # 特征融合
+        fused_features = self.feature_fusion(encoded_features)  # [batch, num_regions, hidden_dim]
+        
+        # Transformer处理
+        transformed_features = self.transformer(fused_features)  # [batch, num_regions, hidden_dim]
+        
+        # 预测
+        predictions = self.prediction_head(transformed_features)  # [batch, num_regions]
+        
+        return predictions
 
-def create_model(config_path: str, input_dim: int):
+    def compute_loss(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # 确保预测和目标的维度匹配
+        if predictions.dim() == 1:
+            predictions = predictions.unsqueeze(-1)  # [batch, 1]
+        if targets.dim() == 1:
+            targets = targets.unsqueeze(-1)  # [batch, 1]
+        
+        # 计算损失
+        loss = self.loss_fn(predictions, targets)
+        return loss
+
+def create_model(config_path: str):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-    training_cfg = config['training']
+    # 传入model下的model字段
     return YeastModel(
-        input_dim=input_dim,
-        hidden_dim=128,
-        num_layers=3,
-        use_lora=training_cfg.get('use_lora', False),
-        lora_rank=training_cfg.get('lora_rank', 4),
-        lora_alpha=training_cfg.get('lora_alpha', 16)
-    ) 
+        cfg=config['model']['model'],
+        use_lora=config['training'].get('use_lora', False),
+        lora_rank=config['training'].get('lora_rank', 4),
+        lora_alpha=config['training'].get('lora_alpha', 16)
+    )
+
+# YeastModel的cfg参数应为如下结构：
+# cfg = {
+#   'feature_encoders': {...},
+#   'feature_fusion': {...},
+#   'transformer': {...},
+#   'prediction_head': {...},
+#   ...
+# } 

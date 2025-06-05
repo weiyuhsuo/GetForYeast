@@ -21,30 +21,31 @@ experiment:
   seed: 42
   debug: true  # 测试模式
 
-# 训练配置（测试用）
+# 训练配置
 training:
-  batch_size: 8  # 小批量，避免内存问题
-  num_workers: 1  # CPU训练，减少线程数
+  batch_size: 32  # 增大批次大小
+  num_workers: 4  # 增加数据加载并行数
   learning_rate: 0.0001
   weight_decay: 0.0001
-  max_epochs: 1  # 只运行一个epoch
-  early_stopping_patience: 2
+  max_epochs: 50  # 增加训练轮数
+  early_stopping_patience: 5
   gradient_clip_val: 1.0
   use_lora: true
-  lora_rank: 2
-  lora_alpha: 8
-  lora_layers: ["encoder", "head_exp"]
-  save_every_n_epochs: 1  # 每个epoch都保存
-  accumulate_grad_batches: 1
-  clip_grad: null
-  use_fp16: false
-  log_every_n_steps: 1  # 每个batch都打印日志
+  lora_rank: 8  # 增加rank
+  lora_alpha: 16
+  lora_layers: ['encoder', 'head_exp']
+  save_every_n_epochs: 1
+  accumulate_grad_batches: 2  # 梯度累积
+  clip_grad: 1.0
+  use_fp16: true  # 启用混合精度
+  log_every_n_steps: 10
   val_check_interval: 1.0
-  warmup_epochs: 0
+  warmup_epochs: 2  # 添加预热期
 
 # 数据配置
 data:
-  data_path: "/home/rhyswei/Code/aiyeast/get_model/input/20250601_data/yeast_data_with_conditions_original_peaks.zarr"
+  # 使用相对路径，确保在不同平台上都能正确访问
+  data_path: "input/20250601_data/yeast_data_with_conditions_original_peaks.zarr"
   # 添加YeastZarrDataset/RegionDataModule所需的参数
   # 例如，如果YeastZarrDataset中实现了数据分割，则添加相关参数
 
@@ -59,9 +60,9 @@ model:
   cfg:
     num_regions: 2268  # 更新为实际peak数
     num_motif: 283
-    embed_dim: 256  # 减小维度，加快训练
-    num_layers: 3   # 减少层数，加快训练
-    num_heads: 8
+    embed_dim: 256
+    num_layers: 3
+    num_heads: 4  # 改为4以匹配预训练模型
     dropout: 0.1
     output_dim: 1
     flash_attn: false
@@ -94,29 +95,106 @@ model:
     metrics:
       components:
         exp: ["pearson", "spearman", "r2"]
+  model:
+    name: "yeast_model"
+    type: "transformer"
+    feature_encoders:
+      media_type:
+        type: "embedding"
+        num_embeddings: 2
+        embedding_dim: 32
+        padding_idx: null
+      temperature:
+        type: "linear"
+        in_features: 1
+        out_features: 32
+      pre_culture:
+        time:
+          type: "linear"
+          in_features: 1
+          out_features: 32
+        od600:
+          type: "linear"
+          in_features: 1
+          out_features: 32
+      drug_culture:
+        time:
+          type: "linear"
+          in_features: 1
+          out_features: 32
+        drug_name:
+          type: "embedding"
+          num_embeddings: 100
+          embedding_dim: 32
+          padding_idx: 0
+        concentration:
+          type: "linear"
+          in_features: 1
+          out_features: 32
+      carbon_source:
+        type: "embedding"
+        num_embeddings: 10
+        embedding_dim: 32
+        padding_idx: 0
+      nitrogen_source:
+        type: "embedding"
+        num_embeddings: 10
+        embedding_dim: 32
+        padding_idx: 0
+    feature_fusion:
+      type: "concat"
+      fusion_dim: 288  # 自动推算，9个特征编码器，每个32维
+      hidden_dim: 128
+      num_layers: 2
+      dropout: 0.1
+    transformer:
+      num_layers: 3
+      num_heads: 4
+      hidden_dim: 128
+      dropout: 0.1
+      activation: "gelu"
+      layer_norm_eps: 1e-5
+    prediction_head:
+      type: "mlp"
+      hidden_dims: [128, 64]
+      dropout: 0.1
+      activation: "relu"
+      output_dim: 1
+    loss:
+      type: "mse"
+      reduction: "mean"
+    optimizer:
+      type: "adam"
+      lr: 0.001
+      weight_decay: 0.0001
+      betas: [0.9, 0.999]
+      eps: 1e-8
+    scheduler:
+      type: "cosine"
+      T_max: 100
+      eta_min: 1e-6
 
-# Finetuning configuration (Crucial for loading pretrained weights and using LoRA)
+# 微调配置
 finetune:
   pretrain_checkpoint: true
-  checkpoint: "checkpoints/regulatory_inference_checkpoint_fetal_adult/pretrain_fetal_adult/checkpoint-799.pth"
+  checkpoint: 'checkpoints/fetal_pretrain_fetal_finetune/Astrocytes/checkpoint-best.pth'
   strict: false
-  model_key: "state_dict"
+  model_key: 'state_dict'
   use_lora: true
   lora_checkpoint: null
-  rename_config: null
-  layers_with_lora: ["encoder", "head_exp"]
+  layers_with_lora: ['encoder', 'head_exp']
   patterns_to_freeze: []
   patterns_to_drop: []
   additional_checkpoints: []
 
-# 日志和输出配置
+# 日志配置
 logging:
-  save_dir: "output/yeast_test_run"  # 测试运行输出目录
-  tensorboard: false  # 测试时关闭tensorboard
-  wandb: false
-  project_name: "yeast_test"
-  run_name: "test_run"
-  use_wandb: false
+  save_dir: 'output/yeast_finetune'
+  tensorboard: true
+  wandb: true
+  project_name: 'yeast_finetune'
+  run_name: 'lora_finetune_v1'
+  use_wandb: true
 
 # 机器配置
 machine:
@@ -126,11 +204,18 @@ machine:
 # 优化器配置
 optimizer:
   lr: 0.0001
-  min_lr: 0.000001
+  min_lr: 1e-6
   weight_decay: 0.05
-  opt: "adamw"
+  opt: 'adamw'
   opt_eps: 1e-8
   opt_betas: [0.9, 0.999]
+
+# 学习率调度器配置
+scheduler:
+  type: 'cosine'
+  T_max: 50  # 与max_epochs一致
+  eta_min: 1e-6
+  warmup_epochs: 2
 
 # 任务配置
 task:
