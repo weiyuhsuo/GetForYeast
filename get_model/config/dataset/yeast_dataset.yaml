@@ -1,0 +1,11 @@
+# yeast_dataset.yaml
+# 用于yeast训练的zarr数据集配置模板
+
+_target_: get_model.data.yeast_dataset.YeastZarrDataset  # 假设你的数据加载类为YeastZarrDataset
+
+zarr_path: /home/rhyswei/Code/aiyeast/get_model/input/20250601_data/yeast_data_with_conditions_original_peaks.zarr
+split: train
+batch_size: 8
+shuffle: true
+num_workers: 1
+# 你可以根据实际需要添加更多字段，如transform、label_key等 

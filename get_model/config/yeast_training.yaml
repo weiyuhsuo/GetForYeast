@@ -1,0 +1,140 @@
+# 基本配置
+defaults:
+  - _self_
+  - model: yeast_model
+  - dataset: yeast_dataset
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+stage: "fit"
+type: "region"
+assembly: "hg38"
+eval_tss: false
+log_image: false
+
+# Inherit from a finetune config template if available and appropriate
+# - finetune: v1_finetune@finetune # Example of inheriting a finetune config
+
+# 实验配置
+experiment:
+  name: yeast_lora_finetuning
+  seed: 42
+  debug: true  # 测试模式
+
+# 训练配置（测试用）
+training:
+  batch_size: 8  # 小批量，避免内存问题
+  num_workers: 1  # CPU训练，减少线程数
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  max_epochs: 1  # 只运行一个epoch
+  early_stopping_patience: 2
+  gradient_clip_val: 1.0
+  use_lora: true
+  lora_rank: 2
+  lora_alpha: 8
+  lora_layers: ["encoder", "head_exp"]
+  save_every_n_epochs: 1  # 每个epoch都保存
+  accumulate_grad_batches: 1
+  clip_grad: null
+  use_fp16: false
+  log_every_n_steps: 1  # 每个batch都打印日志
+  val_check_interval: 1.0
+  warmup_epochs: 0
+
+# 数据配置
+data:
+  data_path: "/home/rhyswei/Code/aiyeast/get_model/input/20250601_data/yeast_data_with_conditions_original_peaks.zarr"
+  # 添加YeastZarrDataset/RegionDataModule所需的参数
+  # 例如，如果YeastZarrDataset中实现了数据分割，则添加相关参数
+
+# Feature encoding configuration (May need to align with original GET expectations)
+# The 'region_motif' in zarr should already contain encoded features
+# feature_encoding:
+#   ... (keep or remove as needed based on GETRegionFinetune input)
+
+# 模型配置
+model:
+  _target_: get_model.model.yeast_model.YeastModel
+  cfg:
+    num_regions: 2268  # 更新为实际peak数
+    num_motif: 283
+    embed_dim: 256  # 减小维度，加快训练
+    num_layers: 3   # 减少层数，加快训练
+    num_heads: 8
+    dropout: 0.1
+    output_dim: 1
+    flash_attn: false
+    pool_method: "mean"
+    region_embed:
+      num_regions: ${model.cfg.num_regions}
+      num_features: ${model.cfg.num_motif} 
+      embed_dim: ${model.cfg.embed_dim}
+    encoder:
+      num_heads: ${model.cfg.num_heads}
+      embed_dim: ${model.cfg.embed_dim}
+      num_layers: ${model.cfg.num_layers}
+      drop_path_rate: ${model.cfg.dropout}
+      drop_rate: 0
+      attn_drop_rate: 0
+      use_mean_pooling: false
+      flash_attn: ${model.cfg.flash_attn}
+    head_exp:
+      embed_dim: ${model.cfg.embed_dim}
+      output_dim: ${model.cfg.output_dim}
+      use_atac: false
+    loss:
+      components:
+        exp:
+          _target_: torch.nn.PoissonNLLLoss
+          reduction: "mean"
+          log_input: False
+      weights:
+        exp: 1.0
+    metrics:
+      components:
+        exp: ["pearson", "spearman", "r2"]
+
+# Finetuning configuration (Crucial for loading pretrained weights and using LoRA)
+finetune:
+  pretrain_checkpoint: true
+  checkpoint: "checkpoints/regulatory_inference_checkpoint_fetal_adult/pretrain_fetal_adult/checkpoint-799.pth"
+  strict: false
+  model_key: "state_dict"
+  use_lora: true
+  lora_checkpoint: null
+  rename_config: null
+  layers_with_lora: ["encoder", "head_exp"]
+  patterns_to_freeze: []
+  patterns_to_drop: []
+  additional_checkpoints: []
+
+# 日志和输出配置
+logging:
+  save_dir: "output/yeast_test_run"  # 测试运行输出目录
+  tensorboard: false  # 测试时关闭tensorboard
+  wandb: false
+  project_name: "yeast_test"
+  run_name: "test_run"
+  use_wandb: false
+
+# 机器配置
+machine:
+  output_dir: "output"
+  num_devices: 1  # CPU训练
+
+# 优化器配置
+optimizer:
+  lr: 0.0001
+  min_lr: 0.000001
+  weight_decay: 0.05
+  opt: "adamw"
+  opt_eps: 1e-8
+  opt_betas: [0.9, 0.999]
+
+# 任务配置
+task:
+  test_mode: "normal"
+  interpret: false
+  save_predictions: false
+  save_embeddings: false 

@@ -1,0 +1,98 @@
+# 模型架构配置
+model:
+  name: "yeast_model"
+  type: "transformer"
+  
+  # 特征编码器配置
+  feature_encoders:
+    media_type:
+      type: "embedding"
+      num_embeddings: 2  # sc, ypd
+      embedding_dim: 32
+      padding_idx: null
+    
+    temperature:
+      type: "linear"
+      in_features: 1
+      out_features: 32
+    
+    pre_culture:
+      time:
+        type: "linear"
+        in_features: 1
+        out_features: 32
+      od600:
+        type: "linear"
+        in_features: 1
+        out_features: 32
+    
+    drug_culture:
+      time:
+        type: "linear"
+        in_features: 1
+        out_features: 32
+      drug_name:
+        type: "embedding"
+        num_embeddings: 100  # 可扩展的药物数量
+        embedding_dim: 32
+        padding_idx: 0
+      concentration:
+        type: "linear"
+        in_features: 1
+        out_features: 32
+    
+    carbon_source:
+      type: "embedding"
+      num_embeddings: 10  # 可扩展的碳源数量
+      embedding_dim: 32
+      padding_idx: 0
+    
+    nitrogen_source:
+      type: "embedding"
+      num_embeddings: 10  # 可扩展的氮源数量
+      embedding_dim: 32
+      padding_idx: 0
+
+  # 特征融合配置
+  feature_fusion:
+    type: "concat"
+    fusion_dim: 256  # 所有特征编码后的总维度
+    hidden_dim: 128
+    num_layers: 2
+    dropout: 0.1
+
+  # Transformer配置
+  transformer:
+    num_layers: 3
+    num_heads: 4
+    hidden_dim: 128
+    dropout: 0.1
+    activation: "gelu"
+    layer_norm_eps: 1e-5
+
+  # 预测头配置
+  prediction_head:
+    type: "mlp"
+    hidden_dims: [128, 64]
+    dropout: 0.1
+    activation: "relu"
+    output_dim: 1  # 预测值维度
+
+  # 损失函数配置
+  loss:
+    type: "mse"  # 均方误差
+    reduction: "mean"
+
+  # 优化器配置
+  optimizer:
+    type: "adam"
+    lr: 0.001
+    weight_decay: 0.0001
+    betas: [0.9, 0.999]
+    eps: 1e-8
+
+  # 学习率调度器配置
+  scheduler:
+    type: "cosine"
+    T_max: 100  # 最大epoch数
+    eta_min: 1e-6  # 最小学习率 
