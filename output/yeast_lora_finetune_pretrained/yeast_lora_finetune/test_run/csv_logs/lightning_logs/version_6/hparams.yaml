@@ -1,0 +1,125 @@
+cfg:
+  defaults:
+  - _self_
+  - model: yeast_model
+  - dataset: yeast_dataset
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+  stage: fit
+  type: region
+  assembly: hg38
+  eval_tss: false
+  log_image: false
+  experiment:
+    name: yeast_lora_finetuning
+    seed: 42
+    debug: true
+  training:
+    batch_size: 8
+    num_workers: 1
+    learning_rate: 0.0001
+    weight_decay: 0.0001
+    max_epochs: 1
+    early_stopping_patience: 2
+    gradient_clip_val: 1.0
+    use_lora: true
+    lora_rank: 2
+    lora_alpha: 8
+    lora_layers:
+    - encoder
+    - head_exp
+    save_every_n_epochs: null
+    accumulate_grad_batches: 1
+    clip_grad: null
+    use_fp16: false
+    log_every_n_steps: 50
+    val_check_interval: 1.0
+    warmup_epochs: 0
+  data:
+    data_path: input/gsm_example_with_condition.zarr
+  model:
+    _target_: get_model.model.model.GETRegionFinetune
+    cfg:
+      num_regions: 900
+      num_motif: 283
+      embed_dim: 768
+      num_layers: 12
+      num_heads: 12
+      dropout: 0.1
+      output_dim: 1
+      flash_attn: false
+      pool_method: mean
+      region_embed:
+        num_regions: 900
+        num_features: 283
+        embed_dim: 768
+      encoder:
+        num_heads: 12
+        embed_dim: 768
+        num_layers: 12
+        drop_path_rate: 0.1
+        drop_rate: 0
+        attn_drop_rate: 0
+        use_mean_pooling: false
+        flash_attn: false
+      head_exp:
+        embed_dim: 768
+        output_dim: 1
+        use_atac: false
+      loss:
+        components:
+          exp:
+            _target_: torch.nn.PoissonNLLLoss
+            reduction: mean
+            log_input: false
+        weights:
+          exp: 1.0
+      metrics:
+        components:
+          exp:
+          - pearson
+          - spearman
+          - r2
+  finetune:
+    pretrain_checkpoint: true
+    checkpoint: checkpoints/regulatory_inference_checkpoint_fetal_adult/pretrain_fetal_adult/checkpoint-799.pth
+    strict: false
+    model_key: state_dict
+    use_lora: true
+    lora_checkpoint: null
+    rename_config: null
+    layers_with_lora:
+    - encoder
+    - head_exp
+    patterns_to_freeze: []
+    patterns_to_drop: []
+    additional_checkpoints: []
+  logging:
+    save_dir: output/yeast_lora_finetune_pretrained
+    tensorboard: true
+    wandb: false
+  run:
+    project_name: yeast_lora_finetune
+    run_name: test_run
+    use_wandb: false
+  machine:
+    output_dir: output/yeast_lora_finetune_pretrained
+    num_devices: 1
+  optimizer:
+    lr: 0.0001
+    min_lr: 1.0e-06
+    weight_decay: 0.05
+    opt: adamw
+    opt_eps: '1e-8'
+    opt_betas:
+    - 0.9
+    - 0.999
+  task:
+    test_mode: normal
+    interpret: false
+    save_predictions: false
+    save_embeddings: false
+  trainer:
+    accelerator: cuda
+    devices: 1
+train_data_size: 200

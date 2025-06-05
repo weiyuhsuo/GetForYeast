@@ -1,51 +1,5 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual Environment
-venv/
-ENV/
-env/
-.env/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# Data and Checkpoints
-input/
 checkpoints/
-output/
-*.zarr
-*.h5
-*.hdf5
-*.pkl
-*.pt
-*.pth
-
-# Logs
-logs/
-*.log 
+__pycache__/
+get_model/__pycache__/
+get_model/model/__pycache__/
+get_model/dataset/__pycache__/

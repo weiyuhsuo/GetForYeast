@@ -1,0 +1,8 @@
+Collecting scanpy
+  Using cached scanpy-1.11.1-py3-none-any.whl.metadata (9.9 kB)
+Collecting anndata>=0.8 (from scanpy)
+  Using cached anndata-0.11.4-py3-none-any.whl.metadata (9.3 kB)
+Requirement already satisfied: h5py>=3.7 in /home/rhyswei/miniconda3/envs/get/lib/python3.12/site-packages (from scanpy) (3.13.0)
+Requirement already satisfied: joblib in /home/rhyswei/miniconda3/envs/get/lib/python3.12/site-packages (from scanpy) (1.5.0)
+Collecting legacy-api-wrap>=1.4 (from scanpy)
+  Using cached legacy_api_wrap-1.4.1-py3-none-any.whl.metadata (2.1 kB)
