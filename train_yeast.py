@@ -10,9 +10,18 @@ from pathlib import Path
 from typing import Dict, Any
 import os
 import torch.optim as optim
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import wandb
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
+import datetime
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+logger = logging.getLogger(__name__)
 
 class YeastDataset(Dataset):
     """
@@ -52,7 +61,7 @@ class YeastDataset(Dataset):
         
         return features, y
 
-def setup_logging(config):
+def setup_logging(config, output_dir):
     """设置日志和wandb"""
     if config.logging.use_wandb:
         wandb.init(
@@ -60,13 +69,20 @@ def setup_logging(config):
             name=config.logging.run_name,
             config=config
         )
-    
-    if config.logging.tensorboard:
-        writer = SummaryWriter(log_dir=config.logging.save_dir)
-    else:
-        writer = None
-    
-    return writer
+    # 设置日志文件输出
+    log_file = output_dir / 'train.log'
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file)
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    return logger
 
 @hydra.main(version_base=None, config_path="get_model/config", config_name="yeast_training")
 def main(config: DictConfig):
@@ -75,15 +91,17 @@ def main(config: DictConfig):
     参数:
         config: 包含训练配置的字典
     """
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = Path(config.logging.save_dir) / timestamp
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger = setup_logging(config, output_dir)
+    
     # 设置随机种子
     torch.manual_seed(config.experiment.seed)
     
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"使用设备: {device}")
-    
-    # 设置日志
-    writer = setup_logging(config)
     
     # 加载数据
     train_dataset = YeastDataset(config.data.data_path)
@@ -95,6 +113,32 @@ def main(config: DictConfig):
         pin_memory=True
     )
     logger.info(f"数据加载完成，批次大小: {config.training.batch_size}")
+    logger.info(f"训练集样本数: {len(train_dataset)}")
+    
+    # 训练前可视化标签分布
+    all_labels = []
+    for i in range(len(train_dataset)):
+        _, y = train_dataset[i]
+        all_labels.extend(y.flatten().tolist())
+    all_labels = np.array(all_labels)
+    plt.figure()
+    plt.hist(all_labels, bins=100, alpha=0.7)
+    plt.title('Label Distribution (Raw)')
+    plt.xlabel('Label')
+    plt.ylabel('Count')
+    plt.savefig(output_dir / 'label_distribution_raw.png')
+    plt.close()
+    # 对标签做log1p归一化
+    def log1p_transform(y):
+        if isinstance(y, torch.Tensor):
+            return torch.log1p(y)
+        else:
+            return np.log1p(y)
+    def expm1_transform(y):
+        if isinstance(y, torch.Tensor):
+            return torch.expm1(y)
+        else:
+            return np.expm1(y)
     
     # 初始化模型
     model = create_model("get_model/config/yeast_training.yaml")
@@ -121,28 +165,39 @@ def main(config: DictConfig):
     )
     
     # 初始化混合精度训练
-    scaler = GradScaler()
+    scaler = GradScaler('cuda')
     
-    # 创建输出目录
-    output_dir = Path(config.logging.save_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # tensorboard writer定义，必须在训练循环前
+    if config.logging.tensorboard:
+        writer = SummaryWriter(log_dir=output_dir)
+    else:
+        writer = None
     
     # 训练循环
     logger.info("开始训练...")
     best_loss = float('inf')
     patience_counter = 0
+    train_loss_list = []
+    lr_list = []
     
-    for epoch in range(config.training.max_epochs):
+    for epoch in tqdm(range(config.training.max_epochs), desc='Epoch'):
         model.train()
         total_loss = 0
+        batch_lr = []
+        batch_losses = []
+        all_preds = []
+        all_targets = []
         
-        for batch_idx, (batch_x, batch_y) in enumerate(train_loader):
+        for batch_idx, (batch_x, batch_y) in tqdm(enumerate(train_loader), total=len(train_loader), desc=f'Batch {epoch+1}'):
             # 将数据移动到设备
             batch_x = {k: v.to(device) for k, v in batch_x.items()}
             batch_y = batch_y.to(device)
             
+            # 对标签做log1p归一化
+            batch_y = log1p_transform(batch_y)
+            
             # 使用混合精度训练
-            with autocast():
+            with autocast('cuda'):
                 # 前向传播
                 outputs = model(batch_x)
                 # 计算损失
@@ -168,6 +223,16 @@ def main(config: DictConfig):
             
             total_loss += loss.item()
             
+            # 记录loss和lr
+            batch_losses.append(loss.item())
+            batch_lr.append(scheduler.get_last_lr()[0])
+            # 记录预测和真实值
+            with torch.no_grad():
+                pred = outputs.detach().cpu().numpy().flatten()
+                target = batch_y.detach().cpu().numpy().flatten()
+                all_preds.extend(pred.tolist())
+                all_targets.extend(target.tolist())
+            
             # 打印训练进度
             if batch_idx % config.training.log_every_n_steps == 0:
                 logger.info(f'Epoch {epoch+1}/{config.training.max_epochs}, '
@@ -191,39 +256,92 @@ def main(config: DictConfig):
         
         # 计算平均损失
         avg_loss = total_loss / len(train_loader)
-        logger.info(f'Epoch {epoch+1}/{config.training.max_epochs}, '
-                   f'Average Loss: {avg_loss:.4f}')
+        train_loss_list.append(avg_loss)
+        lr_list.append(np.mean(batch_lr))
+        # TensorBoard记录
+        if config.logging.tensorboard and writer is not None:
+            writer.add_scalar('train/avg_loss', avg_loss, epoch)
+            writer.add_scalar('train/lr', np.mean(batch_lr), epoch)
+            # 参数分布
+            for name, param in model.named_parameters():
+                writer.add_histogram(name, param.detach().cpu().numpy(), epoch)
+        # 保存loss/lr曲线图片（每次覆盖）
+        fig, ax1 = plt.subplots()
+        ax1.plot(range(1, len(train_loss_list)+1), train_loss_list, label='Train Loss')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+        ax2 = ax1.twinx()
+        ax2.plot(range(1, len(lr_list)+1), lr_list, color='orange', label='LR')
+        ax2.set_ylabel('Learning Rate')
+        fig.legend()
+        plt.title('Loss & LR Curve')
+        plt.savefig(output_dir / 'loss_lr_curve.png')
+        plt.close(fig)
+        # 保存预测vs真实值散点图（每次覆盖）
+        idx = np.random.choice(len(all_preds), min(200, len(all_preds)), replace=False)
+        fig2 = plt.figure()
+        plt.scatter(np.array(all_targets)[idx], np.array(all_preds)[idx], alpha=0.5)
+        plt.xlabel('True')
+        plt.ylabel('Pred')
+        plt.title(f'Pred vs True (epoch {epoch+1})')
+        plt.savefig(output_dir / 'pred_vs_true.png')
+        plt.close(fig2)
+        # TensorBoard
+        if config.logging.tensorboard and writer is not None:
+            import io
+            buf = io.BytesIO()
+            fig2.savefig(buf, format='png')
+            buf.seek(0)
+            import PIL.Image
+            image = PIL.Image.open(buf)
+            image = np.array(image)
+            writer.add_image('pred_vs_true', image.transpose(2,0,1), epoch)
+            buf.close()
         
         # 早停检查
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            patience_counter = 0
-            # 保存最佳模型
-            best_model_path = output_dir / 'best_model.pth'
-            torch.save(model.state_dict(), best_model_path)
-            logger.info(f'Best model saved to {best_model_path}')
+        if config.training.early_stopping_patience is not None:
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                patience_counter = 0
+                # 保存最佳模型
+                best_model_path = output_dir / 'best_model.pth'
+                torch.save(model.state_dict(), best_model_path)
+                logger.info(f'Best model saved to {best_model_path}')
+            else:
+                patience_counter += 1
+                if patience_counter >= config.training.early_stopping_patience:
+                    logger.info(f'Early stopping triggered after {epoch+1} epochs')
+                    break
         else:
-            patience_counter += 1
-            if patience_counter >= config.training.early_stopping_patience:
-                logger.info(f'Early stopping triggered after {epoch+1} epochs')
-                break
+            # 只保存最佳模型，不做早停判断
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                best_model_path = output_dir / 'best_model.pth'
+                torch.save(model.state_dict(), best_model_path)
+                logger.info(f'Best model saved to {best_model_path}')
         
-        # 定期保存检查点
-        if (epoch + 1) % config.training.save_every_n_epochs == 0:
-            checkpoint_path = output_dir / f'checkpoint_epoch_{epoch+1}.pth'
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'loss': avg_loss,
-            }, checkpoint_path)
-            logger.info(f'Checkpoint saved to {checkpoint_path}')
+        # epoch结束后输出统计信息
+        logger.info(f'Epoch {epoch+1}: pred mean={np.mean(all_preds):.4f}, std={np.std(all_preds):.4f}, min={np.min(all_preds):.4f}, max={np.max(all_preds):.4f}; true mean={np.mean(all_targets):.4f}, std={np.std(all_targets):.4f}, min={np.min(all_targets):.4f}, max={np.max(all_targets):.4f}')
+        # 保存部分预测和真实值到csv
+        df_pred = pd.DataFrame({'pred': all_preds[:200], 'true': all_targets[:200]})
+        df_pred.to_csv(output_dir / f'pred_true_epoch{epoch+1}.csv', index=False)
     
-    # 保存最终模型
-    final_model_path = output_dir / 'final_model.pth'
-    torch.save(model.state_dict(), final_model_path)
-    logger.info(f'Final model saved to {final_model_path}')
+    # 训练结束后反归一化并画散点图
+    all_preds = np.array(all_preds)
+    all_targets = np.array(all_targets)
+    pred_inv = expm1_transform(all_preds)
+    true_inv = expm1_transform(all_targets)
+    plt.figure()
+    idx = np.random.choice(len(pred_inv), min(200, len(pred_inv)), replace=False)
+    plt.scatter(true_inv[idx], pred_inv[idx], alpha=0.5)
+    plt.xlabel('True (raw)')
+    plt.ylabel('Pred (raw)')
+    plt.title('Pred vs True (raw, final)')
+    plt.savefig(output_dir / 'pred_vs_true_raw_final.png')
+    plt.close()
+    
+    # 训练结束后保存loss/lr为csv
+    pd.DataFrame({'epoch': np.arange(1, len(train_loss_list)+1), 'loss': train_loss_list, 'lr': lr_list}).to_csv(output_dir / 'loss_lr.csv', index=False)
     
     # 关闭wandb和tensorboard
     if config.logging.use_wandb:

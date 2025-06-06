@@ -32,14 +32,10 @@ ENV/
 *.swo
 
 # Project specific
-output/
-outputs/
 *.pth
 *.log
 logs/
 checkpoints/
-**/output/
-**/outputs/
 **/checkpoints/
 **/*.pth
 **/*.log

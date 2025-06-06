@@ -19,7 +19,7 @@ log_image: false
 experiment:
   name: yeast_lora_finetuning
   seed: 42
-  debug: true  # 测试模式
+  debug: false  # 测试模式
 
 # 训练配置
 training:
@@ -27,8 +27,8 @@ training:
   num_workers: 4  # 增加数据加载并行数
   learning_rate: 0.0001
   weight_decay: 0.0001
-  max_epochs: 50  # 增加训练轮数
-  early_stopping_patience: 5
+  max_epochs: 100  # 增加训练轮数
+  early_stopping_patience: null  # 关闭早停机制
   gradient_clip_val: 1.0
   use_lora: true
   lora_rank: 8  # 增加rank
@@ -194,7 +194,7 @@ logging:
   wandb: true
   project_name: 'yeast_finetune'
   run_name: 'lora_finetune_v1'
-  use_wandb: true
+  use_wandb: false
 
 # 机器配置
 machine:
