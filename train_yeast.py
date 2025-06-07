@@ -71,16 +71,14 @@ def setup_logging(config, output_dir):
             name=config.logging.run_name,
             config=config
         )
-    # 设置日志文件输出
-    log_file = output_dir / 'train.log'
+    # 只设置console输出，不再生成train.log文件
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(log_file)
+            logging.StreamHandler()
         ]
     )
     logger = logging.getLogger(__name__)
@@ -183,7 +181,66 @@ def main(config: DictConfig):
     lr_list = []
     train_start_time = time.time()
     
-    for epoch in tqdm(range(config.training.max_epochs), desc='Epoch'):
+    def evaluate_and_log(preds, targets, output_dir, tag, md_path=None, log_time=None, filter_zero=False):
+        # 评估并画图，tag为before/after
+        import matplotlib.pyplot as plt
+        from scipy.stats import pearsonr, linregress
+        import numpy as np
+        if filter_zero:
+            mask = targets != 0
+            preds = preds[mask]
+            targets = targets[mask]
+            tag = tag + '_filtered'
+        plt.figure()
+        idx = np.random.choice(len(targets), min(200, len(targets)), replace=False)
+        plt.scatter(targets[idx], preds[idx], alpha=0.5)
+        plt.xlabel('True (log1p)')
+        plt.ylabel('Pred (log1p)')
+        plt.title(f'Pred vs True (log1p, {tag})')
+        fig_path = output_dir / f'pred_vs_true_log1p_{tag}.png'
+        plt.savefig(fig_path)
+        plt.close()
+        # 计算指标
+        r, p = pearsonr(targets, preds)
+        slope, intercept, r_value, p_value, std_err = linregress(targets, preds)
+        n = len(targets)
+        # 写入log
+        if md_path is not None:
+            with open(md_path, 'a', encoding='utf-8') as f:
+                if log_time:
+                    f.write(f"\n## {tag} 评估时间：{log_time}\n")
+                else:
+                    f.write(f"\n## {tag} 评估\n")
+                f.write(f"- Pearson r: {r:.4f}\n")
+                f.write(f"- P值: {p:.2e}\n")
+                f.write(f"- Slope: {slope:.4f}\n")
+                f.write(f"- 样本数: {n}\n")
+                f.write(f"- 预测均值: {np.mean(preds):.4f}\n")
+                f.write(f"- 预测方差: {np.std(preds):.4f}\n")
+                f.write(f"- 真实均值: {np.mean(targets):.4f}\n")
+                f.write(f"- 真实方差: {np.std(targets):.4f}\n")
+                f.write(f"- 结果可视化: {fig_path}\n")
+
+    # ========== 训练前评估 ==========
+    all_preds = []
+    all_targets = []
+    model.eval()
+    with torch.no_grad():
+        for batch_x, batch_y in train_loader:
+            batch_x = {k: v.to(device) for k, v in batch_x.items()}
+            batch_y = batch_y.to(device)
+            batch_y = log1p_transform(batch_y)
+            outputs = model(batch_x)
+            all_preds.extend(outputs.detach().cpu().numpy().flatten().tolist())
+            all_targets.extend(batch_y.detach().cpu().numpy().flatten().tolist())
+    all_preds = np.array(all_preds)
+    all_targets = np.array(all_targets)
+    md_path = output_dir / 'train_log.md'
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    evaluate_and_log(all_preds, all_targets, output_dir, tag='before', md_path=md_path, log_time=now)
+
+    # ========== 训练过程 ==========
+    for epoch in tqdm(range(80), desc='Epoch'):
         model.train()
         total_loss = 0
         batch_lr = []
@@ -238,7 +295,7 @@ def main(config: DictConfig):
             
             # 打印训练进度
             if batch_idx % config.training.log_every_n_steps == 0:
-                logger.info(f'Epoch {epoch+1}/{config.training.max_epochs}, '
+                logger.info(f'Epoch {epoch+1}/{80}, '
                           f'Batch {batch_idx}/{len(train_loader)}, '
                           f'Loss: {loss.item():.4f}, '
                           f'LR: {scheduler.get_last_lr()[0]:.6f}')
@@ -329,28 +386,13 @@ def main(config: DictConfig):
         df_pred = pd.DataFrame({'pred': all_preds[:200], 'true': all_targets[:200]})
         df_pred.to_csv(output_dir / 'pred_true.csv', index=False)
     
-    # 训练结束后反归一化并画散点图
+    # ========== 训练后评估 ==========
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)
-    pred_inv = expm1_transform(all_preds)
-    true_inv = expm1_transform(all_targets)
-    plt.figure()
-    idx = np.random.choice(len(pred_inv), min(200, len(pred_inv)), replace=False)
-    plt.scatter(true_inv[idx], pred_inv[idx], alpha=0.5)
-    plt.xlabel('True (raw)')
-    plt.ylabel('Pred (raw)')
-    plt.title('Pred vs True (raw, final)')
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    evaluate_and_log(all_preds, all_targets, output_dir, tag='after', md_path=md_path, log_time=now)
+    evaluate_and_log(all_preds, all_targets, output_dir, tag='after', md_path=md_path, log_time=now, filter_zero=True)
 
-    # 计算四个指标
-    r, p = pearsonr(true_inv, pred_inv)
-    slope, intercept, r_value, p_value, std_err = linregress(true_inv, pred_inv)
-    n = len(true_inv)
-    # 在图上标注
-    plt.text(0.05, 0.95, f"Pearson r = {r:.2f}\nP = {p:.1e}\nSlope = {slope:.2f}\nn = {n}",
-             transform=plt.gca().transAxes, fontsize=12, verticalalignment='top')
-    plt.savefig(output_dir / 'pred_vs_true_raw_final.png')
-    plt.close()
-    
     # 训练结束后保存loss/lr为csv（每次覆盖）
     pd.DataFrame({'epoch': np.arange(1, len(train_loss_list)+1), 'loss': train_loss_list, 'lr': lr_list}).to_csv(output_dir / 'loss_lr.csv', index=False)
     
@@ -369,20 +411,9 @@ def main(config: DictConfig):
         for k, v in dict(config).items():
             f.write(f"- {k}: {v}\n")
         f.write(f"\n### 训练总耗时\n- {train_time_str}\n")
-        f.write(f"\n### 评估指标\n")
-        f.write(f"- 最终训练loss: {train_loss_list[-1]:.4f}\n")
-        f.write(f"- 预测均值: {np.mean(all_preds):.4f}\n")
-        f.write(f"- 预测方差: {np.std(all_preds):.4f}\n")
-        f.write(f"- 真实均值: {np.mean(all_targets):.4f}\n")
-        f.write(f"- 真实方差: {np.std(all_targets):.4f}\n")
-        f.write(f"- Pearson r: {r:.4f}\n")
-        f.write(f"- P值: {p:.2e}\n")
-        f.write(f"- Slope: {slope:.4f}\n")
-        f.write(f"- 样本数: {n}\n")
         f.write(f"\n### 结果可视化\n")
         f.write(f"- Loss/LR曲线: {output_dir / 'loss_lr_curve.png'}\n")
-        f.write(f"- 预测vs真实值散点图: {output_dir / 'pred_vs_true.png'}\n")
-        f.write(f"- 最终反归一化散点图: {output_dir / 'pred_vs_true_raw_final.png'}\n")
+        f.write(f"- 预测vs真实值散点图 (log1p): {output_dir / 'pred_vs_true_log1p_after.png'}\n")
         f.write(f"\n### 备注\n- （可补充实验现象、问题、TODO等）\n")
     
     # 关闭wandb和tensorboard
