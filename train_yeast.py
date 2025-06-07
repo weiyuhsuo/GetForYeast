@@ -18,6 +18,8 @@ import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import time
+from scipy.stats import pearsonr, linregress
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -179,6 +181,7 @@ def main(config: DictConfig):
     patience_counter = 0
     train_loss_list = []
     lr_list = []
+    train_start_time = time.time()
     
     for epoch in tqdm(range(config.training.max_epochs), desc='Epoch'):
         model.train()
@@ -322,9 +325,9 @@ def main(config: DictConfig):
         
         # epoch结束后输出统计信息
         logger.info(f'Epoch {epoch+1}: pred mean={np.mean(all_preds):.4f}, std={np.std(all_preds):.4f}, min={np.min(all_preds):.4f}, max={np.max(all_preds):.4f}; true mean={np.mean(all_targets):.4f}, std={np.std(all_targets):.4f}, min={np.min(all_targets):.4f}, max={np.max(all_targets):.4f}')
-        # 保存部分预测和真实值到csv
+        # 保存部分预测和真实值到csv（每次覆盖）
         df_pred = pd.DataFrame({'pred': all_preds[:200], 'true': all_targets[:200]})
-        df_pred.to_csv(output_dir / f'pred_true_epoch{epoch+1}.csv', index=False)
+        df_pred.to_csv(output_dir / 'pred_true.csv', index=False)
     
     # 训练结束后反归一化并画散点图
     all_preds = np.array(all_preds)
@@ -337,11 +340,50 @@ def main(config: DictConfig):
     plt.xlabel('True (raw)')
     plt.ylabel('Pred (raw)')
     plt.title('Pred vs True (raw, final)')
+
+    # 计算四个指标
+    r, p = pearsonr(true_inv, pred_inv)
+    slope, intercept, r_value, p_value, std_err = linregress(true_inv, pred_inv)
+    n = len(true_inv)
+    # 在图上标注
+    plt.text(0.05, 0.95, f"Pearson r = {r:.2f}\nP = {p:.1e}\nSlope = {slope:.2f}\nn = {n}",
+             transform=plt.gca().transAxes, fontsize=12, verticalalignment='top')
     plt.savefig(output_dir / 'pred_vs_true_raw_final.png')
     plt.close()
     
-    # 训练结束后保存loss/lr为csv
+    # 训练结束后保存loss/lr为csv（每次覆盖）
     pd.DataFrame({'epoch': np.arange(1, len(train_loss_list)+1), 'loss': train_loss_list, 'lr': lr_list}).to_csv(output_dir / 'loss_lr.csv', index=False)
+    
+    # 训练总耗时
+    train_end_time = time.time()
+    train_time = train_end_time - train_start_time
+    train_time_str = f"{train_time/60:.1f} 分钟" if train_time > 60 else f"{train_time:.1f} 秒"
+
+    # 训练结束后自动记录到 Markdown 日志（输出到output_dir）
+    md_path = output_dir / 'train_log.md'
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with open(md_path, 'a', encoding='utf-8') as f:
+        f.write(f"\n## 实验时间：{now}\n")
+        f.write(f"### 主要修改\n- （请在此补充本次实验的主要修改点）\n")
+        f.write(f"\n### 训练参数\n")
+        for k, v in dict(config).items():
+            f.write(f"- {k}: {v}\n")
+        f.write(f"\n### 训练总耗时\n- {train_time_str}\n")
+        f.write(f"\n### 评估指标\n")
+        f.write(f"- 最终训练loss: {train_loss_list[-1]:.4f}\n")
+        f.write(f"- 预测均值: {np.mean(all_preds):.4f}\n")
+        f.write(f"- 预测方差: {np.std(all_preds):.4f}\n")
+        f.write(f"- 真实均值: {np.mean(all_targets):.4f}\n")
+        f.write(f"- 真实方差: {np.std(all_targets):.4f}\n")
+        f.write(f"- Pearson r: {r:.4f}\n")
+        f.write(f"- P值: {p:.2e}\n")
+        f.write(f"- Slope: {slope:.4f}\n")
+        f.write(f"- 样本数: {n}\n")
+        f.write(f"\n### 结果可视化\n")
+        f.write(f"- Loss/LR曲线: {output_dir / 'loss_lr_curve.png'}\n")
+        f.write(f"- 预测vs真实值散点图: {output_dir / 'pred_vs_true.png'}\n")
+        f.write(f"- 最终反归一化散点图: {output_dir / 'pred_vs_true_raw_final.png'}\n")
+        f.write(f"\n### 备注\n- （可补充实验现象、问题、TODO等）\n")
     
     # 关闭wandb和tensorboard
     if config.logging.use_wandb:
