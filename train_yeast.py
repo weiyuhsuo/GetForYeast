@@ -123,22 +123,11 @@ def main(config: DictConfig):
     all_labels = np.array(all_labels)
     plt.figure()
     plt.hist(all_labels, bins=100, alpha=0.7)
-    plt.title('Label Distribution (Raw)')
+    plt.title('Label Distribution')
     plt.xlabel('Label')
     plt.ylabel('Count')
-    plt.savefig(output_dir / 'label_distribution_raw.png')
+    plt.savefig(output_dir / 'label_distribution.png')
     plt.close()
-    # 对标签做log1p归一化
-    def log1p_transform(y):
-        if isinstance(y, torch.Tensor):
-            return torch.log1p(y)
-        else:
-            return np.log1p(y)
-    def expm1_transform(y):
-        if isinstance(y, torch.Tensor):
-            return torch.expm1(y)
-        else:
-            return np.expm1(y)
     
     # 初始化模型
     model = create_model("get_model/config/yeast_training.yaml")
@@ -186,6 +175,8 @@ def main(config: DictConfig):
         import matplotlib.pyplot as plt
         from scipy.stats import pearsonr, linregress
         import numpy as np
+        print(f"[DEBUG] evaluate_and_log: len(preds)={len(preds)}, len(targets)={len(targets)}")
+        assert len(preds) == len(targets), f"[ERROR] preds和targets长度不一致: preds={len(preds)}, targets={len(targets)}"
         if filter_zero:
             mask = targets != 0
             preds = preds[mask]
@@ -194,10 +185,10 @@ def main(config: DictConfig):
         plt.figure()
         idx = np.random.choice(len(targets), min(200, len(targets)), replace=False)
         plt.scatter(targets[idx], preds[idx], alpha=0.5)
-        plt.xlabel('True (log1p)')
-        plt.ylabel('Pred (log1p)')
-        plt.title(f'Pred vs True (log1p, {tag})')
-        fig_path = output_dir / f'pred_vs_true_log1p_{tag}.png'
+        plt.xlabel('True')
+        plt.ylabel('Pred')
+        plt.title(f'Pred vs True ({tag})')
+        fig_path = output_dir / f'pred_vs_true_{tag}.png'
         plt.savefig(fig_path)
         plt.close()
         # 计算指标
@@ -229,12 +220,13 @@ def main(config: DictConfig):
         for batch_x, batch_y in train_loader:
             batch_x = {k: v.to(device) for k, v in batch_x.items()}
             batch_y = batch_y.to(device)
-            batch_y = log1p_transform(batch_y)
             outputs = model(batch_x)
-            all_preds.extend(outputs.detach().cpu().numpy().flatten().tolist())
-            all_targets.extend(batch_y.detach().cpu().numpy().flatten().tolist())
+            # flatten后再extend，确保一一对应
+            all_preds.extend(outputs.detach().cpu().numpy().flatten())
+            all_targets.extend(batch_y.detach().cpu().numpy().flatten())
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)
+    print(f"[DEBUG] 训练前评估: len(all_preds)={len(all_preds)}, len(all_targets)={len(all_targets)}")
     md_path = output_dir / 'train_log.md'
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     evaluate_and_log(all_preds, all_targets, output_dir, tag='before', md_path=md_path, log_time=now)
@@ -252,9 +244,6 @@ def main(config: DictConfig):
             # 将数据移动到设备
             batch_x = {k: v.to(device) for k, v in batch_x.items()}
             batch_y = batch_y.to(device)
-            
-            # 对标签做log1p归一化
-            batch_y = log1p_transform(batch_y)
             
             # 使用混合精度训练
             with autocast('cuda'):
@@ -413,7 +402,7 @@ def main(config: DictConfig):
         f.write(f"\n### 训练总耗时\n- {train_time_str}\n")
         f.write(f"\n### 结果可视化\n")
         f.write(f"- Loss/LR曲线: {output_dir / 'loss_lr_curve.png'}\n")
-        f.write(f"- 预测vs真实值散点图 (log1p): {output_dir / 'pred_vs_true_log1p_after.png'}\n")
+        f.write(f"- 预测vs真实值散点图: {output_dir / 'pred_vs_true_after.png'}\n")
         f.write(f"\n### 备注\n- （可补充实验现象、问题、TODO等）\n")
     
     # 关闭wandb和tensorboard

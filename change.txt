@@ -1,0 +1,26 @@
+# 2024-03-21 修改记录
+
+## 1. 配置文件修改 (get_model/config/yeast_training.yaml)
+- 更新数据路径：
+  - 原路径: "input/20250601_data/yeast_data_with_conditions_original_peaks.zarr"
+  - 新路径: "/root/autodl-tmp/get_model/input/GSM7028212_mock_mock1.zarr"
+- 添加ATAC数据配置：
+  - 添加 `quantitative_atac: true` 启用ATAC数据
+
+## 2. 训练脚本修改 (train_yeast.py)
+- 移除表达值转换相关代码：
+  - 删除 `log1p_transform` 和 `expm1_transform` 函数
+  - 移除训练过程中的 `batch_y = log1p_transform(batch_y)` 转换
+- 更新可视化部分：
+  - 修改图表标题，移除 "log1p" 相关标注
+  - 更新输出文件名，移除 "log1p" 后缀
+  - 更新标签分布图文件名从 'label_distribution_raw.png' 到 'label_distribution.png'
+  - 更新预测vs真实值散点图文件名格式
+- 保持其他训练逻辑不变：
+  - 数据加载
+  - 模型训练
+  - 评估指标计算
+  - 日志记录
+
+# 2024-03-21 再次修改
+- 修正训练前评估部分 all_targets 的收集方式，确保与 all_preds 一一对应，避免长度不一致导致的报错。

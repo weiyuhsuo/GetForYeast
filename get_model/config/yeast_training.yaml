@@ -44,8 +44,8 @@ training:
 
 # 数据配置
 data:
-  # 使用相对路径，确保在不同平台上都能正确访问
-  data_path: "input/20250601_data/yeast_data_with_conditions_original_peaks.zarr"
+  data_path: "/root/autodl-tmp/get_model/input/GSM7028212_mock_mock1.zarr"
+  quantitative_atac: true  # 启用ATAC数据
   # 添加YeastZarrDataset/RegionDataModule所需的参数
   # 例如，如果YeastZarrDataset中实现了数据分割，则添加相关参数
 
