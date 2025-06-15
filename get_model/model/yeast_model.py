@@ -45,7 +45,7 @@ class FeatureEncoder(nn.Module):
         self.encoders['drug_name'] = nn.Embedding(
             num_embeddings=config['drug_culture']['drug_name']['num_embeddings'],
             embedding_dim=config['drug_culture']['drug_name']['embedding_dim'],
-            padding_idx=config['drug_culture']['drug_name']['padding_idx']
+            padding_idx=config['drug_culture']['drug_name'].get('padding_idx')
         )
         self.encoders['concentration'] = nn.Linear(
             in_features=config['drug_culture']['concentration']['in_features'],
@@ -56,148 +56,106 @@ class FeatureEncoder(nn.Module):
         self.encoders['carbon_source'] = nn.Embedding(
             num_embeddings=config['carbon_source']['num_embeddings'],
             embedding_dim=config['carbon_source']['embedding_dim'],
-            padding_idx=config['carbon_source']['padding_idx']
+            padding_idx=config['carbon_source'].get('padding_idx')
         )
         
         # 氮源编码器
         self.encoders['nitrogen_source'] = nn.Embedding(
             num_embeddings=config['nitrogen_source']['num_embeddings'],
             embedding_dim=config['nitrogen_source']['embedding_dim'],
-            padding_idx=config['nitrogen_source']['padding_idx']
+            padding_idx=config['nitrogen_source'].get('padding_idx')
+        )
+        
+        # motif特征编码器
+        self.encoders['motif_features'] = nn.Linear(
+            in_features=config['motif_features']['in_features'],
+            out_features=config['motif_features']['out_features']
         )
 
-    def forward(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        encoded_features = {}
-        for name, encoder in self.encoders.items():
-            if name in features:
-                encoded_features[name] = encoder(features[name])
-        return encoded_features
-
-class LoRALinear(nn.Module):
-    def __init__(self, in_features, out_features, r=4, alpha=16, dropout=0.0):
-        super().__init__()
-        self.r = r
-        self.alpha = alpha
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        self.linear = nn.Linear(in_features, out_features)
-        if r > 0:
-            self.lora_A = nn.Parameter(torch.zeros((r, in_features)))
-            self.lora_B = nn.Parameter(torch.zeros((out_features, r)))
-            nn.init.kaiming_uniform_(self.lora_A, a=5 ** 0.5)
-            nn.init.zeros_(self.lora_B)
-            self.scaling = alpha / r
-        else:
-            self.lora_A = None
-            self.lora_B = None
-            self.scaling = 1.0
-
-    def forward(self, x):
-        out = self.linear(x)
-        if self.r > 0:
-            out = out + self.dropout((x @ self.lora_A.t()) @ self.lora_B.t()) * self.scaling
-        return out
-
 class FeatureFusion(nn.Module):
-    """特征融合模块，支持LoRA"""
-    def __init__(self, config: Dict, use_lora=False, lora_rank=4, lora_alpha=16):
+    """特征融合模块"""
+    def __init__(self, config: Dict):
         super().__init__()
         self.fusion_type = config['type']
         self.fusion_dim = config['fusion_dim']
         self.hidden_dim = config['hidden_dim']
-        self.use_lora = use_lora
-        self.lora_rank = lora_rank
-        self.lora_alpha = lora_alpha
-        # 主线性层
-        self.linear1 = nn.Linear(self.fusion_dim, self.hidden_dim)
-        # LoRA分支
-        if use_lora:
-            self.lora1 = LoRALinear(self.fusion_dim, self.hidden_dim, r=lora_rank, alpha=lora_alpha, dropout=config['dropout'])
-        else:
-            self.lora1 = None
-        self.norm1 = nn.LayerNorm(self.hidden_dim)
-        self.act1 = nn.GELU()
-        self.dropout1 = nn.Dropout(config['dropout'])
-        self.linear2 = nn.Linear(self.hidden_dim, self.hidden_dim)
-        if use_lora:
-            self.lora2 = LoRALinear(self.hidden_dim, self.hidden_dim, r=lora_rank, alpha=lora_alpha, dropout=config['dropout'])
-        else:
-            self.lora2 = None
-        self.norm2 = nn.LayerNorm(self.hidden_dim)
-        self.act2 = nn.GELU()
-        self.dropout2 = nn.Dropout(config['dropout'])
-
-    def forward(self, encoded_features: Dict[str, torch.Tensor]) -> torch.Tensor:
-        concat_features = torch.cat(list(encoded_features.values()), dim=-1)
-        x = self.linear1(concat_features)
-        if self.use_lora and self.lora1 is not None:
-            x = x + self.lora1(concat_features)
-        x = self.norm1(x)
-        x = self.act1(x)
-        x = self.dropout1(x)
-        x2 = self.linear2(x)
-        if self.use_lora and self.lora2 is not None:
-            x2 = x2 + self.lora2(x)
-        x2 = self.norm2(x2)
-        x2 = self.act2(x2)
-        x2 = self.dropout2(x2)
-        return x2
+        self.num_layers = config['num_layers']
+        self.dropout = config['dropout']
+        
+        # 特征融合层
+        layers = []
+        in_dim = self.fusion_dim
+        for _ in range(self.num_layers):
+            layers.extend([
+                nn.Linear(in_dim, self.hidden_dim),
+                nn.LayerNorm(self.hidden_dim),
+                nn.GELU(),
+                nn.Dropout(self.dropout)
+            ])
+            in_dim = self.hidden_dim
+        
+        self.fusion_net = nn.Sequential(*layers)
 
 class YeastTransformer(nn.Module):
-    """酵母Transformer模块，支持LoRA"""
-    def __init__(self, config: Dict, use_lora=False, lora_rank=4, lora_alpha=16):
+    """Transformer编码器模块"""
+    def __init__(self, config: Dict):
         super().__init__()
         self.num_layers = config['num_layers']
         self.num_heads = config['num_heads']
         self.hidden_dim = config['hidden_dim']
         self.dropout = config['dropout']
-        self.use_lora = use_lora
-        self.lora_rank = lora_rank
-        self.lora_alpha = lora_alpha
+        self.activation = config['activation']
+        self.layer_norm_eps = config['layer_norm_eps']
+        
+        # Transformer编码器层
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.hidden_dim,
             nhead=self.num_heads,
             dim_feedforward=self.hidden_dim * 4,
             dropout=self.dropout,
-            activation=config['activation'],
-            layer_norm_eps=float(config['layer_norm_eps']),
+            activation=self.activation,
+            layer_norm_eps=self.layer_norm_eps,
             batch_first=True
         )
         self.transformer = nn.TransformerEncoder(
             encoder_layer,
             num_layers=self.num_layers
         )
-        # LoRA可选：可在主干的线性层插入LoRA分支（如有需要可进一步细化）
-
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [batch, seq, d]
-        output = self.transformer(x)
-        return output
+        """
+        前向传播
+        Args:
+            x: 输入张量，形状为 [batch_size, seq_len, hidden_dim]
+        Returns:
+            输出张量，形状为 [batch_size, seq_len, hidden_dim]
+        """
+        return self.transformer(x)
 
 class PredictionHead(nn.Module):
     """预测头模块"""
     def __init__(self, config: Dict):
         super().__init__()
+        self.head_type = config['type']
+        self.hidden_dims = config['hidden_dims']
+        self.dropout = config['dropout']
+        self.activation = config['activation']
+        self.output_dim = config['output_dim']
+        
+        # 预测头网络
         layers = []
-        input_dim = config['hidden_dims'][0]
-        
-        # 构建MLP层
-        for hidden_dim in config['hidden_dims'][1:]:
+        in_dim = self.hidden_dims[0]
+        for hidden_dim in self.hidden_dims[1:]:
             layers.extend([
-                nn.Linear(input_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(config['dropout'])
+                nn.Linear(in_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU() if self.activation == 'relu' else nn.GELU(),
+                nn.Dropout(self.dropout)
             ])
-            input_dim = hidden_dim
+            in_dim = hidden_dim
         
-        # 输出层
-        layers.append(nn.Linear(input_dim, config['output_dim']))
-        
-        self.mlp = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [batch, num_regions, hidden_dim]
-        x = self.mlp(x)  # [batch, num_regions, 1]
-        return x.squeeze(-1)  # [batch, num_regions]
+        layers.append(nn.Linear(in_dim, self.output_dim))
+        self.pred_net = nn.Sequential(*layers)
 
 class YeastModel(nn.Module):
     def __init__(self, cfg: Dict, use_lora=False, lora_rank=4, lora_alpha=16):
@@ -210,20 +168,10 @@ class YeastModel(nn.Module):
         self.feature_encoder = FeatureEncoder(cfg['feature_encoders'])
         
         # 特征融合
-        self.feature_fusion = FeatureFusion(
-            cfg['feature_fusion'],
-            use_lora=use_lora,
-            lora_rank=lora_rank,
-            lora_alpha=lora_alpha
-        )
+        self.feature_fusion = FeatureFusion(cfg['feature_fusion'])
         
         # Transformer
-        self.transformer = YeastTransformer(
-            cfg['transformer'],
-            use_lora=use_lora,
-            lora_rank=lora_rank,
-            lora_alpha=lora_alpha
-        )
+        self.transformer = YeastTransformer(cfg['transformer'])
         
         # 预测头
         self.prediction_head = PredictionHead(cfg['prediction_head'])
@@ -245,31 +193,27 @@ class YeastModel(nn.Module):
             else:
                 logger.warning(f"预训练检查点路径不存在: {checkpoint_path}")
 
-    def forward(self, features: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, x: Dict[str, torch.Tensor]) -> torch.Tensor:
         # 特征编码
-        encoded_features = self.feature_encoder(features)
+        encoded_features = {}
+        for key, value in x.items():
+            if key in self.feature_encoder.encoders:
+                encoded_features[key] = self.feature_encoder.encoders[key](value)
         
         # 特征融合
-        fused_features = self.feature_fusion(encoded_features)  # [batch, num_regions, hidden_dim]
+        fused_features = torch.cat([encoded_features[key] for key in sorted(encoded_features.keys())], dim=-1)
+        fused_features = self.feature_fusion.fusion_net(fused_features)
         
-        # Transformer处理
-        transformed_features = self.transformer(fused_features)  # [batch, num_regions, hidden_dim]
+        # Transformer编码
+        transformer_output = self.transformer(fused_features)
         
         # 预测
-        predictions = self.prediction_head(transformed_features)  # [batch, num_regions]
+        predictions = self.prediction_head.pred_net(transformer_output)
         
         return predictions
 
     def compute_loss(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        # 确保预测和目标的维度匹配
-        if predictions.dim() == 1:
-            predictions = predictions.unsqueeze(-1)  # [batch, 1]
-        if targets.dim() == 1:
-            targets = targets.unsqueeze(-1)  # [batch, 1]
-        
-        # 计算损失
-        loss = self.loss_fn(predictions, targets)
-        return loss
+        return self.loss_fn(predictions, targets)
 
 def create_model(config_path: str):
     with open(config_path, 'r') as f:

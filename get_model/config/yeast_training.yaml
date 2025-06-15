@@ -23,28 +23,28 @@ experiment:
 
 # 训练配置
 training:
-  batch_size: 32  # 增大批次大小
-  num_workers: 4  # 增加数据加载并行数
+  batch_size: 2
+  num_workers: 0
   learning_rate: 0.0001
   weight_decay: 0.0001
-  max_epochs: 100  # 增加训练轮数
-  early_stopping_patience: null  # 关闭早停机制
+  max_epochs: 100
+  early_stopping_patience: null
   gradient_clip_val: 1.0
   use_lora: true
-  lora_rank: 8  # 增加rank
+  lora_rank: 8
   lora_alpha: 16
   lora_layers: ['encoder', 'head_exp']
   save_every_n_epochs: 1
-  accumulate_grad_batches: 2  # 梯度累积
+  accumulate_grad_batches: 2
   clip_grad: 1.0
-  use_fp16: true  # 启用混合精度
-  log_every_n_steps: 10
+  use_fp16: true
+  log_every_n_steps: 1
   val_check_interval: 1.0
-  warmup_epochs: 2  # 添加预热期
+  warmup_epochs: 2
 
 # 数据配置
 data:
-  data_path: "/root/autodl-tmp/get_model/input/GSM7028212_mock_mock1.zarr"
+  data_path: "/root/autodl-tmp/get_model/input/yeast_3d.zarr"
   quantitative_atac: true  # 启用ATAC数据
   # 添加YeastZarrDataset/RegionDataModule所需的参数
   # 例如，如果YeastZarrDataset中实现了数据分割，则添加相关参数
@@ -58,18 +58,19 @@ data:
 model:
   _target_: get_model.model.yeast_model.YeastModel
   cfg:
-    num_regions: 2268  # 更新为实际peak数
-    num_motif: 283
+    num_regions: 3376  # 更新为实际peak数
+    num_motif: 284  # motif特征数
+    num_conditions: 45  # 实验条件特征数
     embed_dim: 256
     num_layers: 3
-    num_heads: 4  # 改为4以匹配预训练模型
+    num_heads: 4
     dropout: 0.1
     output_dim: 1
     flash_attn: false
     pool_method: "mean"
     region_embed:
       num_regions: ${model.cfg.num_regions}
-      num_features: ${model.cfg.num_motif} 
+      num_features: ${model.cfg.num_motif}
       embed_dim: ${model.cfg.embed_dim}
     encoder:
       num_heads: ${model.cfg.num_heads}
@@ -87,9 +88,8 @@ model:
     loss:
       components:
         exp:
-          _target_: torch.nn.PoissonNLLLoss
+          _target_: torch.nn.MSELoss
           reduction: "mean"
-          log_input: False
       weights:
         exp: 1.0
     metrics:
@@ -99,6 +99,10 @@ model:
     name: "yeast_model"
     type: "transformer"
     feature_encoders:
+      motif_features:
+        type: "linear"
+        in_features: 284
+        out_features: 32
       media_type:
         type: "embedding"
         num_embeddings: 2
@@ -143,7 +147,7 @@ model:
         padding_idx: 0
     feature_fusion:
       type: "concat"
-      fusion_dim: 288  # 自动推算，9个特征编码器，每个32维
+      fusion_dim: 320  # 10个特征编码器，每个32维
       hidden_dim: 128
       num_layers: 2
       dropout: 0.1
@@ -160,19 +164,6 @@ model:
       dropout: 0.1
       activation: "relu"
       output_dim: 1
-    loss:
-      type: "mse"
-      reduction: "mean"
-    optimizer:
-      type: "adam"
-      lr: 0.001
-      weight_decay: 0.0001
-      betas: [0.9, 0.999]
-      eps: 1e-8
-    scheduler:
-      type: "cosine"
-      T_max: 100
-      eta_min: 1e-6
 
 # 微调配置
 finetune:

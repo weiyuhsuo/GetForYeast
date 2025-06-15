@@ -20,6 +20,10 @@ import numpy as np
 import pandas as pd
 import time
 from scipy.stats import pearsonr, linregress
+import warnings
+
+# 过滤zarr的vlen-utf8编码器警告
+warnings.filterwarnings("ignore", category=UserWarning, module="zarr.codecs.vlen_utf8")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -29,39 +33,63 @@ class YeastDataset(Dataset):
     """
     酵母数据集类，用于加载Zarr格式的数据
     数据包含：
-    - region_motif: 形状为 (66, 2268, 297) 的特征矩阵
-        - 0-282: motif特征（已归一化）
-        - 283-296: condition特征（部分归一化）
-    - exp_label: 形状为 (66, 2268) 的表达值矩阵
+    - matrix: 形状为 (3376, 66, 329) 的特征矩阵
+        - 前284维: motif特征
+        - 后45维: 实验条件特征
+    - peak_ids: 形状为 (3376,) 的peak ID列表
+    - sample_ids: 形状为 (66,) 的样本ID列表
+    - motif_names: 形状为 (284,) 的motif特征名列表
+    - condition_onehot_names: 形状为 (44,) 的实验条件特征名列表
     """
     def __init__(self, zarr_path):
         self.root = zarr.open(zarr_path, mode='r')
-        self.region_motif = self.root['region_motif']  # 特征矩阵
-        self.exp_label = self.root['exp_label']       # 表达值标签
+        self.matrix = self.root['matrix']  # 主数据矩阵
+        self.peak_ids = self.root['peak_ids']  # peak ID列表
+        self.sample_ids = self.root['sample_ids']  # 样本ID列表
+        self.motif_names = self.root['motif_names']  # motif特征名列表
+        self.condition_names = self.root['condition_onehot_names']  # 实验条件特征名列表
+        
+        # 打印数据信息
+        print(f"Matrix shape: {self.matrix.shape}")
+        print(f"Peak IDs shape: {self.peak_ids.shape}")
+        print(f"Sample IDs shape: {self.sample_ids.shape}")
+        print(f"Motif names shape: {self.motif_names.shape}")
+        print(f"Condition names shape: {self.condition_names.shape}")
+        
+        # 验证数据
+        assert self.matrix.shape[0] == self.peak_ids.shape[0], "Peak数量不匹配"
+        assert self.matrix.shape[1] == self.sample_ids.shape[0], "样本数量不匹配"
+        assert self.matrix.shape[2] == self.motif_names.shape[0] + self.condition_names.shape[0] + 1, "特征维度不匹配"
 
     def __len__(self):
-        return self.region_motif.shape[0]  # 返回样本数量
+        return self.matrix.shape[0]  # 返回peak数量
 
     def __getitem__(self, idx):
-        # 转换为PyTorch张量
-        x = torch.tensor(self.region_motif[idx], dtype=torch.float32)
-        y = torch.tensor(self.exp_label[idx], dtype=torch.float32)
-        
-        # 提取特征
-        features = {
-            'media_type': x[:, 283].long(),  # 培养基类型
-            'temperature': x[:, 284:285],    # 温度
-            'pre_culture_time': x[:, 285:286],  # 预培养时间
-            'pre_culture_od600': x[:, 286:287],  # 预培养OD600
-            'drug_culture_time': x[:, 287:288],  # 药物培养时间
-            'drug_name': x[:, 288].long(),   # 药物名称
-            'concentration': x[:, 289:290],  # 药物浓度
-            'carbon_source': x[:, 290].long(),  # 碳源
-            'nitrogen_source': x[:, 291].long(),  # 氮源
-            'motif_features': x[:, :283]  # motif特征
-        }
-        
-        return features, y
+        try:
+            print(f"  __getitem__ called with idx={idx}")
+            x = torch.tensor(self.matrix[idx], dtype=torch.float32)
+            if idx == 0:
+                print(f"    x.shape: {x.shape}")
+            features = {
+                'motif_features': x[:, :284],
+                'media_type': x[:, 284].long(),
+                'temperature': x[:, 285:286],
+                'pre_culture_time': x[:, 286:287],
+                'pre_culture_od600': x[:, 287:288],
+                'drug_culture_time': x[:, 288:289],
+                'drug_name': x[:, 289].long(),
+                'concentration': x[:, 290:291],
+                'carbon_source': x[:, 291].long(),
+                'nitrogen_source': x[:, 292].long(),
+            }
+            y = x[:, -1]
+            if idx == 0:
+                print(f"    features keys: {list(features.keys())}")
+                print(f"    y shape: {y.shape}, y min: {y.min()}, y max: {y.max()}")
+            return features, y
+        except Exception as e:
+            print(f"__getitem__ error at idx={idx}: {e}")
+            raise
 
 def setup_logging(config, output_dir):
     """设置日志和wandb"""
@@ -104,7 +132,9 @@ def main(config: DictConfig):
     logger.info(f"使用设备: {device}")
     
     # 加载数据
+    print('准备加载数据集...')
     train_dataset = YeastDataset(config.data.data_path)
+    print('数据集加载完成，准备DataLoader...')
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.training.batch_size,
@@ -112,8 +142,8 @@ def main(config: DictConfig):
         num_workers=config.training.num_workers,
         pin_memory=True
     )
-    logger.info(f"数据加载完成，批次大小: {config.training.batch_size}")
-    logger.info(f"训练集样本数: {len(train_dataset)}")
+    print(f"DataLoader创建完成，批次大小: {config.training.batch_size}, num_workers: {config.training.num_workers}")
+    print(f"训练集样本数: {len(train_dataset)}")
     
     # 训练前可视化标签分布
     all_labels = []
@@ -192,8 +222,13 @@ def main(config: DictConfig):
         plt.savefig(fig_path)
         plt.close()
         # 计算指标
-        r, p = pearsonr(targets, preds)
-        slope, intercept, r_value, p_value, std_err = linregress(targets, preds)
+        if np.all(targets == targets[0]):
+            r, p = np.nan, np.nan
+            slope, intercept, r_value, p_value, std_err = np.nan, np.nan, np.nan, np.nan, np.nan
+            print(f"[WARNING] {tag} 评估中targets全为常数，无法计算相关系数和线性回归")
+        else:
+            r, p = pearsonr(targets, preds)
+            slope, intercept, r_value, p_value, std_err = linregress(targets, preds)
         n = len(targets)
         # 写入log
         if md_path is not None:
@@ -213,26 +248,28 @@ def main(config: DictConfig):
                 f.write(f"- 结果可视化: {fig_path}\n")
 
     # ========== 训练前评估 ==========
+    print("开始训练前评估... (for循环即将开始)")
     all_preds = []
     all_targets = []
     model.eval()
     with torch.no_grad():
-        for batch_x, batch_y in train_loader:
+        print("  进入with torch.no_grad()，即将遍历train_loader ...")
+        for i, (batch_x, batch_y) in enumerate(train_loader):
+            print(f"  评估 batch {i+1} ...")
             batch_x = {k: v.to(device) for k, v in batch_x.items()}
             batch_y = batch_y.to(device)
             outputs = model(batch_x)
-            # flatten后再extend，确保一一对应
             all_preds.extend(outputs.detach().cpu().numpy().flatten())
             all_targets.extend(batch_y.detach().cpu().numpy().flatten())
-    all_preds = np.array(all_preds)
-    all_targets = np.array(all_targets)
-    print(f"[DEBUG] 训练前评估: len(all_preds)={len(all_preds)}, len(all_targets)={len(all_targets)}")
-    md_path = output_dir / 'train_log.md'
-    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    evaluate_and_log(all_preds, all_targets, output_dir, tag='before', md_path=md_path, log_time=now)
+            print(f"  评估 batch {i+1} 完成")
+            if i >= 1:
+                print("  只评估2个batch，提前break")
+                break
+    print("训练前评估完成")
 
     # ========== 训练过程 ==========
     for epoch in tqdm(range(80), desc='Epoch'):
+        print(f"Epoch {epoch+1} 开始...")
         model.train()
         total_loss = 0
         batch_lr = []
@@ -241,6 +278,7 @@ def main(config: DictConfig):
         all_targets = []
         
         for batch_idx, (batch_x, batch_y) in tqdm(enumerate(train_loader), total=len(train_loader), desc=f'Batch {epoch+1}'):
+            print(f"  Batch {batch_idx+1}/{len(train_loader)} 开始...")
             # 将数据移动到设备
             batch_x = {k: v.to(device) for k, v in batch_x.items()}
             batch_y = batch_y.to(device)
@@ -302,6 +340,7 @@ def main(config: DictConfig):
                                     epoch * len(train_loader) + batch_idx)
                     writer.add_scalar('train/lr', scheduler.get_last_lr()[0],
                                     epoch * len(train_loader) + batch_idx)
+            print(f"  Batch {batch_idx+1}/{len(train_loader)} 结束，loss={loss.item():.4f}")
         
         # 计算平均损失
         avg_loss = total_loss / len(train_loader)
@@ -374,6 +413,7 @@ def main(config: DictConfig):
         # 保存部分预测和真实值到csv（每次覆盖）
         df_pred = pd.DataFrame({'pred': all_preds[:200], 'true': all_targets[:200]})
         df_pred.to_csv(output_dir / 'pred_true.csv', index=False)
+        print(f"Epoch {epoch+1} 结束，平均loss={total_loss/len(train_loader):.4f}")
     
     # ========== 训练后评估 ==========
     all_preds = np.array(all_preds)
